@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  localstack:
+    container_name: localstack-serverless-lab
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"            # Gateway principal LocalStack
+      - "4510-4559:4510-4559"  # Range para serviços externos
+    
+    environment:
+      # Serviços AWS a serem emulados
+      - SERVICES=lambda,dynamodb,s3,sns,iam,logs,cloudwatch,cloudformation,apigateway
+      
+      # Configurações de debug
+      - DEBUG=1
+      - LS_LOG=INFO
+      
+      # Configurações Lambda
+      - LAMBDA_EXECUTOR=docker
+      - LAMBDA_REMOTE_DOCKER=0
+      - LAMBDA_DOCKER_NETWORK=localstack-network
+      
+      # Persistência desabilitada para desenvolvimento
+      # Em produção, considere habilitar para manter dados
+      - PERSISTENCE=0
+      
+      # Configurações adicionais
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    
+    volumes:
+      # Volume para persistência (se habilitado)
+      - localstack-data:/var/lib/localstack
+      # Socket do Docker para execução de Lambda
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    
+    networks:
+      - localstack-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  localstack-data:
+    driver: local
+
+networks:
+  localstack-network:
+    driver: bridge

@@ -1,0 +1,233 @@
+service: data-processing-service
+
+# Versão do Serverless Framework
+frameworkVersion: '^3.38.0'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'local'}
+  region: us-east-1
+  
+  # Variáveis de ambiente globais para todas as funções
+  environment:
+    TABLE_NAME: ${self:custom.tableName}
+    BUCKET_NAME: ${self:custom.bucketName}
+    TOPIC_ARN: 
+      Ref: DataProcessingTopic
+    AWS_ENDPOINT_URL: ${self:custom.localstack.endpoint}
+  
+  # Políticas IAM para as funções Lambda
+  iam:
+    role:
+      statements:
+        # Permissões DynamoDB
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            Fn::GetAtt:
+              - ProcessedDataTable
+              - Arn
+        
+        # Permissões S3
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:ListBucket
+          Resource:
+            - Fn::GetAtt:
+                - DataProcessingBucket
+                - Arn
+            - Fn::Join:
+                - ''
+                - - Fn::GetAtt:
+                      - DataProcessingBucket
+                      - Arn
+                  - '/*'
+        
+        # Permissões SNS
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            Ref: DataProcessingTopic
+        
+        # Permissões CloudWatch Logs
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: '*'
+
+# Configurações customizadas
+custom:
+  # Nomes dos recursos
+  tableName: ProcessedData
+  bucketName: data-processing-bucket
+  topicName: data-processing-notifications
+  
+  # Configuração LocalStack
+  localstack:
+    stages:
+      - local
+    host: http://localhost
+    edgePort: 4566
+    autostart: false
+    endpoint: http://localhost:4566
+    lambda:
+      mountCode: false
+    docker:
+      sudo: false
+
+# Plugins necessários
+plugins:
+  - serverless-localstack
+  - serverless-offline
+
+# Definição das funções Lambda
+functions:
+  # Função 1: Processar arquivos CSV do S3
+  dataProcessor:
+    handler: src/handlers/dataProcessor.handler
+    name: DataProcessorFunction
+    description: Processa arquivos CSV do S3 e salva no DynamoDB
+    timeout: 60
+    memorySize: 256
+    environment:
+      # Override de variáveis específicas para LocalStack
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    events:
+      # Trigger: Evento S3 quando arquivo é criado
+      - s3:
+          bucket: 
+            Ref: DataProcessingBucket
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: input/
+            - suffix: .csv
+          existing: true
+
+  # Função 2: API REST para criar registros
+  createRecord:
+    handler: src/handlers/createRecord.handler
+    name: CreateRecordFunction
+    description: API REST para criar registros no DynamoDB
+    timeout: 10
+    memorySize: 128
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    events:
+      # Trigger: HTTP POST /records
+      - http:
+          path: records
+          method: post
+          cors: true
+
+# Recursos AWS (Infrastructure as Code usando CloudFormation)
+resources:
+  Resources:
+    # S3 Bucket para armazenar arquivos CSV
+    DataProcessingBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketName}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+    
+    # Permissão para S3 invocar Lambda
+    DataProcessorLambdaPermissionS3:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName:
+          Fn::GetAtt:
+            - DataProcessorLambdaFunction
+            - Arn
+        Action: lambda:InvokeFunction
+        Principal: s3.amazonaws.com
+        SourceArn:
+          Fn::GetAtt:
+            - DataProcessingBucket
+            - Arn
+    
+    # Tabela DynamoDB para armazenar dados processados
+    ProcessedDataTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: N
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        Tags:
+          - Key: Environment
+            Value: ${self:provider.stage}
+          - Key: Service
+            Value: ${self:service}
+    
+    # Tópico SNS para notificações
+    DataProcessingTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:custom.topicName}
+        DisplayName: Data Processing Notifications
+        Tags:
+          - Key: Environment
+            Value: ${self:provider.stage}
+  
+  # Outputs (valores exportados para referência)
+  Outputs:
+    BucketName:
+      Description: Nome do bucket S3
+      Value:
+        Ref: DataProcessingBucket
+      Export:
+        Name: ${self:service}-${self:provider.stage}-BucketName
+    
+    TableName:
+      Description: Nome da tabela DynamoDB
+      Value:
+        Ref: ProcessedDataTable
+      Export:
+        Name: ${self:service}-${self:provider.stage}-TableName
+    
+    TopicArn:
+      Description: ARN do tópico SNS
+      Value:
+        Ref: DataProcessingTopic
+      Export:
+        Name: ${self:service}-${self:provider.stage}-TopicArn
+    
+    FunctionArn:
+      Description: ARN da função Lambda principal
+      Value:
+        Fn::GetAtt:
+          - DataProcessorLambdaFunction
+          - Arn
+      Export:
+        Name: ${self:service}-${self:provider.stage}-FunctionArn
+    
+    ApiEndpoint:
+      Description: URL do API Gateway
+      Value:
+        Fn::Sub: http://localhost:4566/restapis/${ApiGatewayRestApi}/local/_user_request_
